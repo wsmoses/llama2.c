@@ -95,6 +95,23 @@ void malloc_run_state(RunState* s, Config* p) {
     }
 }
 
+
+void zero_run_state(RunState* s, Config* p) {
+    // we calloc instead of malloc to keep valgrind happy
+    memset(s->x, 0, p->dim * sizeof(float));
+    memset(s->xb, 0, p->dim * sizeof(float));
+    memset(s->xb2, 0, p->dim * sizeof(float));
+    memset(s->hb, 0,p->hidden_dim * sizeof(float));
+    memset(s->hb2, 0,p->hidden_dim * sizeof(float));
+    memset(s->q, 0,p->dim * sizeof(float));
+    memset(s->k, 0,p->dim * sizeof(float));
+    memset(s->v, 0,p->dim * sizeof(float));
+    memset(s->att, 0,p->n_heads * p->seq_len * sizeof(float));
+    memset(s->logits, 0,p->vocab_size * sizeof(float));
+    memset(s->key_cache, 0,p->n_layers * p->seq_len * p->dim * sizeof(float));
+    memset(s->value_cache, 0,p->n_layers * p->seq_len * p->dim * sizeof(float));
+}
+
 void free_run_state(RunState* s) {
     free(s->x);
     free(s->xb);
@@ -219,7 +236,8 @@ void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights*
 
     // forward all the layers
     for(int l = 0; l < p->n_layers; l++) {
-    
+    // for(int l = 0; l < 1; l++) {
+
         // attention rmsnorm
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
 
@@ -492,9 +510,9 @@ int main(int argc, char *argv[]) {
     printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
 
 
+    double alpha = 0.001;
 
     if(training_data){
-        double alpha = 0.000001;
 
         // read the train.txt file
         FILE *train_file = fopen(training_data, "r");
@@ -526,7 +544,7 @@ int main(int argc, char *argv[]) {
                     maxj = j;
                 }
             }
-            // printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
+            printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
 
             i += maxlen;
             
@@ -547,9 +565,12 @@ int main(int argc, char *argv[]) {
                                 enzyme_const, temperature);
 
             for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
+                if (abs(dweights_ptr[i]) > 1000 || isnan(dweights_ptr[i]))
+                printf("%i %f\n", i, dweights_ptr[i]);
                 weights_ptr[i] += alpha * dweights_ptr[i];
                 dweights_ptr[i] = 0;
             }
+            zero_run_state(&dstate, &config);
 
             token = maxj;
             pos++;
@@ -567,6 +588,31 @@ int main(int argc, char *argv[]) {
     // free_run_state(&state);
     // malloc_run_state(&state, &config);
 
+    // while (pos < steps) {
+
+    //     // forward the transformer to get logits for the next token
+    //     transformer(token, pos, &config, &state, &weights);
+    //     // sample the next token
+    //     if(temperature == 0.0f) {
+    //         // greedy argmax sampling
+    //         next = argmax(state.logits, config.vocab_size);
+    //     } else {
+    //         // apply the temperature to the logits
+    //         for (int q=0; q<config.vocab_size; q++) { state.logits[q] /= temperature; }
+    //         // apply softmax to the logits to get the probabilities for next token
+    //         softmax(state.logits, config.vocab_size);
+    //         // we now want to sample from this distribution to get the next token
+    //         next = sample(state.logits, config.vocab_size);
+    //     }
+    //     // printf("%d\n", next);
+    //     printf("%s", vocab[next]);
+    //     fflush(stdout);
+
+    //     token = next;
+    //     pos++;
+
+    // }
+
     while (pos < steps) {
 
         // forward the transformer to get logits for the next token
@@ -583,9 +629,19 @@ int main(int argc, char *argv[]) {
             // we now want to sample from this distribution to get the next token
             next = sample(state.logits, config.vocab_size);
         }
-        printf("%d\n", next);
+        // printf("%d\n", next);
         printf("%s", vocab[next]);
         fflush(stdout);
+
+        int nexttok = next;
+        __enzyme_autodiff((void*)loss,
+                            enzyme_const, token,
+                            enzyme_const, pos,
+                            enzyme_const, &config,
+                            enzyme_dup, &state, &dstate, 
+                            enzyme_dup, &weights , &dweights,
+                            nexttok,
+                            enzyme_const, temperature);
 
         token = next;
         pos++;
