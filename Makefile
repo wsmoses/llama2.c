@@ -1,8 +1,11 @@
 
 # the most basic way of building that is most likely to work on most systems
-.PHONY: run
+.PHONY: runtrain
 run: run.c
 	gcc -O3 -o run run.c -lm
+
+runtrain: run.c
+	/usr/local/Cellar/llvm/16.0.5/bin/clang -fpass-plugin=/usr/local/Cellar/enzyme/version/ClangEnzyme-16.dylib -O3 -o run run.c -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin 1.0 3

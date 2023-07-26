@@ -339,6 +339,22 @@ int sample(float* probabilities, int n) {
     return n - 1; // in case of rounding errors
 }
 
+void loss(int token, int pos, Config* p, RunState* s, TransformerWeights* w, int nexttok) {
+    transformer(token, pos, &config, &state, &weights);
+
+    // apply the temperature to the logits
+    for (int q=0; q<config.vocab_size; q++) { state.logits[q] /= temperature; }
+
+    // apply softmax to the logits to get the probabilities for next token
+    softmax(state.logits, config.vocab_size);
+
+    // we now want to sample from this distribution to get the next token
+    //next = sample(state.logits, config.vocab_size);
+
+    return -log(state.logits[nexttok]);
+}
+
+
 int argmax(float* v, int n) {
     // return argmax of v in elements 0..n
     int max_i = 0;
@@ -364,6 +380,10 @@ long time_in_ms() {
         return -1; // Return -1 to indicate an error
     }
 }
+
+int enzyme_const;
+int enzyme_dup;
+void __enzyme_autodiff(void*, ...);
 
 int main(int argc, char *argv[]) {
 
@@ -393,8 +413,12 @@ int main(int argc, char *argv[]) {
     // read in the model.bin file
     Config config;
     TransformerWeights weights;
+    TransformerWeights dweights;
     int fd = 0;
     float* data = NULL;
+    float* ddata = NULL;
+    float* weights_ptr;
+    float* dweights_ptr;
     long file_size;
     {
         FILE *file = fopen(checkpoint, "rb");
@@ -414,10 +438,14 @@ int main(int argc, char *argv[]) {
         // memory map the Transformer weights into the data pointer
         fd = open(checkpoint, O_RDONLY); // open in read only mode
         if (fd == -1) { printf("open failed!\n"); return 1; }
-        data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        data = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
         if (data == MAP_FAILED) { printf("mmap failed!\n"); return 1; }
-        float* weights_ptr = data + sizeof(Config)/sizeof(float);
+        ddata = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (ddata == MAP_FAILED) { printf("mmap failed!\n"); return 1; }
+        weights_ptr = data + sizeof(Config)/sizeof(float);
+        dweights_ptr = ddata + sizeof(Config)/sizeof(float);
         checkpoint_init_weights(&weights, &config, weights_ptr, shared_weights);
+        checkpoint_init_weights(&dweights, &config, dweights_ptr, shared_weights);
     }
     // right now we cannot run for more than config.seq_len steps
     if (steps <= 0 || steps > config.seq_len) { steps = config.seq_len; }
@@ -444,6 +472,8 @@ int main(int argc, char *argv[]) {
     // create and init the application RunState
     RunState state;
     malloc_run_state(&state, &config);
+    RunState dstate;
+    malloc_run_state(&dstate, &config);
     
     // the current position we are in
     long start = time_in_ms();
@@ -471,9 +501,26 @@ int main(int argc, char *argv[]) {
         printf("%s", vocab[next]);
         fflush(stdout);
 
+        auto nexttok = next;
+        __enzyme_autodiff((void*)loss,
+                            enzyme_const, token,
+                            enzyme_const, pos,
+                            enzyme_const, &config,
+                            enzyme_dup, &state, &dstate, 
+                            enzyme_dup, &weights , &dweights,
+                            nexttok);
+
+        for loop over weights
+        for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
+            weights_ptr[i] += alpha * dweights_ptr[i];
+            dweights_ptr[i] = 0;
+        }
+
         // advance forward
         token = next;
         pos++;
+
+
     }
 
     // report achieved tok/s
