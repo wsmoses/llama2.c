@@ -17,6 +17,7 @@ $ ./run
 #include <fcntl.h>
 #include <sys/mman.h>
 
+#define memcpy __builtin_memcpy
 // ----------------------------------------------------------------------------
 // Transformer and RunState structs, and related memory management
 
@@ -339,19 +340,19 @@ int sample(float* probabilities, int n) {
     return n - 1; // in case of rounding errors
 }
 
-void loss(int token, int pos, Config* p, RunState* s, TransformerWeights* w, int nexttok) {
-    transformer(token, pos, &config, &state, &weights);
+double loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, double temperature) {
+    transformer(token, pos, config, s, w);
 
     // apply the temperature to the logits
-    for (int q=0; q<config.vocab_size; q++) { state.logits[q] /= temperature; }
+    for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
 
     // apply softmax to the logits to get the probabilities for next token
-    softmax(state.logits, config.vocab_size);
+    softmax(s->logits, config->vocab_size);
 
     // we now want to sample from this distribution to get the next token
     //next = sample(state.logits, config.vocab_size);
 
-    return -log(state.logits[nexttok]);
+    return -log(s->logits[nexttok]);
 }
 
 
@@ -391,9 +392,10 @@ int main(int argc, char *argv[]) {
     char *checkpoint = NULL;  // e.g. out/model.bin
     float temperature = 0.9f; // e.g. 1.0, or 0.0
     int steps = 256;          // max number of steps to run for, 0: use seq_len
+    char *training_data = NULL;
     // 'checkpoint' is necessary arg
     if (argc < 2) {
-        printf("Usage: %s <checkpoint_file> [temperature] [steps]\n", argv[0]);
+        printf("Usage: %s <checkpoint_file> [temperature] [steps] [training_data]\n", argv[0]);
         return 1;
     }
     if (argc >= 2) {
@@ -405,6 +407,9 @@ int main(int argc, char *argv[]) {
     }
     if (argc >= 4) {
         steps = atoi(argv[3]);
+    }
+    if(argc >= 5) {
+        training_data = argv[4];
     }
 
     // seed rng with time. if you want deterministic behavior use temperature 0.0
@@ -474,18 +479,98 @@ int main(int argc, char *argv[]) {
     malloc_run_state(&state, &config);
     RunState dstate;
     malloc_run_state(&dstate, &config);
+
+
+
     
+
     // the current position we are in
     long start = time_in_ms();
     int next;
     int token = 1; // 1 = BOS token in Llama-2 sentencepiece
     int pos = 0;
     printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
+
+
+
+    if(training_data){
+        double alpha = 0.000001;
+
+        // read the train.txt file
+        FILE *train_file = fopen(training_data, "r");
+        if (!train_file) {
+            printf("Unable to open train.txt\n");
+            return 1;
+        }
+        fseek(train_file, 0, SEEK_END);
+        long length = ftell(train_file);
+        fseek(train_file, 0, SEEK_SET);
+        char* train_text = malloc(length);
+        if (fread(train_text, 1, length, train_file) != length) {
+            printf("Failed to read train.txt\n");
+            return 1;
+        }
+        fclose(train_file);
+        
+
+        // greedily match with vocab
+        for (int i = 0; i < length && pos < steps; ) {
+            int maxlen = -1;
+            int maxj = -1;
+
+            for (int j = 0; j < config.vocab_size; j++) {
+                int len = strlen(vocab[j]);
+                // 
+                if (strncmp(&train_text[i], vocab[j], len) == 0 && len > maxlen) {
+                    maxlen = len;
+                    maxj = j;
+                }
+            }
+            // printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
+
+            i += maxlen;
+            
+            
+            int nexttok = maxj;
+            printf("%s", vocab[nexttok]);
+            fflush(stdout);
+
+            // transformer(token, pos, &config, &state, &weights);
+
+            __enzyme_autodiff((void*)loss,
+                                enzyme_const, token,
+                                enzyme_const, pos,
+                                enzyme_const, &config,
+                                enzyme_dup, &state, &dstate, 
+                                enzyme_dup, &weights , &dweights,
+                                nexttok,
+                                enzyme_const, temperature);
+
+            for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
+                weights_ptr[i] += alpha * dweights_ptr[i];
+                dweights_ptr[i] = 0;
+            }
+
+            token = maxj;
+            pos++;
+            // break;
+
+        }
+
+        printf("\n\nFinished fine-tuning.\n\n");
+
+        pos = 0;
+        token = 1;
+        printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
+    }
+
+    // free_run_state(&state);
+    // malloc_run_state(&state, &config);
+
     while (pos < steps) {
 
         // forward the transformer to get logits for the next token
         transformer(token, pos, &config, &state, &weights);
-
         // sample the next token
         if(temperature == 0.0f) {
             // greedy argmax sampling
@@ -498,30 +583,16 @@ int main(int argc, char *argv[]) {
             // we now want to sample from this distribution to get the next token
             next = sample(state.logits, config.vocab_size);
         }
+        printf("%d\n", next);
         printf("%s", vocab[next]);
         fflush(stdout);
 
-        auto nexttok = next;
-        __enzyme_autodiff((void*)loss,
-                            enzyme_const, token,
-                            enzyme_const, pos,
-                            enzyme_const, &config,
-                            enzyme_dup, &state, &dstate, 
-                            enzyme_dup, &weights , &dweights,
-                            nexttok);
-
-        for loop over weights
-        for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
-            weights_ptr[i] += alpha * dweights_ptr[i];
-            dweights_ptr[i] = 0;
-        }
-
-        // advance forward
         token = next;
         pos++;
 
-
     }
+
+
 
     // report achieved tok/s
     long end = time_in_ms();
