@@ -5,7 +5,7 @@ run: run.c
 	gcc -O3 -o run run.c -lm
 
 runtrain: run.c
-	/opt/homebrew/bin/clang -fpass-plugin=/opt/homebrew/lib/ClangEnzyme-16.dylib -O3 -o run run.c -lm
+	/opt/homebrew/bin/clang -fpass-plugin=/opt/homebrew/lib/ClangEnzyme-16.dylib -Xclang -load -Xclang /opt/homebrew/lib/ClangEnzyme-16.dylib -mllvm -enzyme-print-perf -O3 -o run run.c -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin 1.0 3

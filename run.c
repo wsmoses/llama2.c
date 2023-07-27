@@ -33,43 +33,43 @@ typedef struct {
 
 typedef struct {
     // token embedding table
-    float* token_embedding_table;    // (vocab_size, dim)
+    float* __restrict__ token_embedding_table;    // (vocab_size, dim)
     // weights for rmsnorms
-    float* rms_att_weight; // (layer, dim) rmsnorm weights
-    float* rms_ffn_weight; // (layer, dim)
+    float*  __restrict__ rms_att_weight; // (layer, dim) rmsnorm weights
+    float*  __restrict__ rms_ffn_weight; // (layer, dim)
     // weights for matmuls
-    float* wq; // (layer, dim, dim)
-    float* wk; // (layer, dim, dim)
-    float* wv; // (layer, dim, dim)
-    float* wo; // (layer, dim, dim)
+    float* __restrict__  wq; // (layer, dim, dim)
+    float*  __restrict__ wk; // (layer, dim, dim)
+    float*  __restrict__ wv; // (layer, dim, dim)
+    float*  __restrict__ wo; // (layer, dim, dim)
     // weights for ffn
-    float* w1; // (layer, hidden_dim, dim)
-    float* w2; // (layer, dim, hidden_dim)
-    float* w3; // (layer, hidden_dim, dim)
+    float*  __restrict__ w1; // (layer, hidden_dim, dim)
+    float*  __restrict__ w2; // (layer, dim, hidden_dim)
+    float*  __restrict__ w3; // (layer, hidden_dim, dim)
     // final rmsnorm
-    float* rms_final_weight; // (dim,)
+    float*  __restrict__ rms_final_weight; // (dim,)
     // freq_cis for RoPE relatively positional embeddings
-    float* freq_cis_real; // (seq_len, dim/2)
-    float* freq_cis_imag; // (seq_len, dim/2)
+    float*  __restrict__ freq_cis_real; // (seq_len, dim/2)
+    float*  __restrict__ freq_cis_imag; // (seq_len, dim/2)
     // (optional) classifier weights for the logits, on the last layer
-    float* wcls;
+    float*  __restrict__ wcls;
 } TransformerWeights;
 
 typedef struct {
     // current wave of activations
-    float *x; // activation at current time stamp (dim,)
-    float *xb; // same, but inside a residual branch (dim,)
-    float *xb2; // an additional buffer just for convenience (dim,)
-    float *hb; // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *q; // query (dim,)
-    float *k; // key (dim,)
-    float *v; // value (dim,)
-    float *att; // buffer for scores/attention values (n_heads, seq_len)
-    float *logits; // output logits
+    float * __restrict__ x; // activation at current time stamp (dim,)
+    float * __restrict__ xb; // same, but inside a residual branch (dim,)
+    float * __restrict__ xb2; // an additional buffer just for convenience (dim,)
+    float * __restrict__ hb; // buffer for hidden dimension in the ffn (hidden_dim,)
+    float * __restrict__ hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
+    float * __restrict__ q; // query (dim,)
+    float * __restrict__ k; // key (dim,)
+    float * __restrict__ v; // value (dim,)
+    float * __restrict__ att; // buffer for scores/attention values (n_heads, seq_len)
+    float * __restrict__ logits; // output logits
     // kv cache
-    float* key_cache;   // (layer, seq_len, dim)
-    float* value_cache; // (layer, seq_len, dim)
+    float*  __restrict__ key_cache;   // (layer, seq_len, dim)
+    float*  __restrict__ value_cache; // (layer, seq_len, dim)
 } RunState;
 
 void malloc_run_state(RunState* s, Config* p) {
@@ -218,7 +218,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     }
 }
 
-void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights* w) {
+void transformer(int token, int pos, Config* __restrict__ p, RunState* __restrict__ s, TransformerWeights* __restrict__ w) {
     
     // a few convenience variables
     float *x = s->x;
@@ -236,8 +236,7 @@ void transformer(int token, int pos, Config* p, RunState* s, TransformerWeights*
 
     // forward all the layers
     for(int l = 0; l < p->n_layers; l++) {
-    // for(int l = 0; l < 1; l++) {
-
+    
         // attention rmsnorm
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
 
@@ -358,7 +357,7 @@ int sample(float* probabilities, int n) {
     return n - 1; // in case of rounding errors
 }
 
-double loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, double temperature) {
+float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, float temperature) {
     transformer(token, pos, config, s, w);
 
     // apply the temperature to the logits
@@ -370,7 +369,7 @@ double loss(int token, int pos, Config* __restrict__ config, RunState* __restric
     // we now want to sample from this distribution to get the next token
     //next = sample(state.logits, config.vocab_size);
 
-    return -log(s->logits[nexttok]);
+    return -log(s->logits[nexttok] + 1e-10);
 }
 
 
@@ -402,7 +401,14 @@ long time_in_ms() {
 
 int enzyme_const;
 int enzyme_dup;
-void __enzyme_autodiff(void*, ...);
+void __enzyme_autodiff(void*, 
+        int, int,
+        int, int,
+        int, Config*,
+        int, RunState*, RunState*,
+        int, TransformerWeights*, TransformerWeights*,
+        int,
+        int, float);
 
 int main(int argc, char *argv[]) {
 
@@ -530,6 +536,7 @@ int main(int argc, char *argv[]) {
         }
         fclose(train_file);
         
+        // float* dweightsacc_ptr = calloc(file_size - sizeof(Config)/sizeof(float));
 
         // greedily match with vocab
         for (int i = 0; i < length && pos < steps; ) {
@@ -544,7 +551,7 @@ int main(int argc, char *argv[]) {
                     maxj = j;
                 }
             }
-            printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
+            // printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
 
             i += maxlen;
             
@@ -565,8 +572,8 @@ int main(int argc, char *argv[]) {
                                 enzyme_const, temperature);
 
             for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
-                if (abs(dweights_ptr[i]) > 1000 || isnan(dweights_ptr[i]))
-                printf("%i %f\n", i, dweights_ptr[i]);
+                // if (abs(dweights_ptr[i]) > 1000 || isnan(dweights_ptr[i]))
+                //     printf("%i %f\n", i, dweights_ptr[i]);
                 weights_ptr[i] += alpha * dweights_ptr[i];
                 dweights_ptr[i] = 0;
             }
