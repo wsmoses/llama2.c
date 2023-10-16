@@ -357,21 +357,6 @@ int sample(float* probabilities, int n) {
     return n - 1; // in case of rounding errors
 }
 
-float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, float temperature) {
-    transformer(token, pos, config, s, w);
-
-    // apply the temperature to the logits
-    for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
-
-    // apply softmax to the logits to get the probabilities for next token
-    softmax(s->logits, config->vocab_size);
-
-    // we now want to sample from this distribution to get the next token
-    //next = sample(state.logits, config.vocab_size);
-
-    return -log(s->logits[nexttok] + 1e-10);
-}
-
 
 int argmax(float* v, int n) {
     // return argmax of v in elements 0..n
@@ -384,6 +369,22 @@ int argmax(float* v, int n) {
         }
     }
     return max_i;
+}
+
+
+float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, float temperature) {
+    transformer(token, pos, config, s, w);
+
+    // apply the temperature to the logits
+    for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
+
+    // apply softmax to the logits to get the probabilities for next token
+    softmax(s->logits, config->vocab_size);
+
+    // we now want to sample from this distribution to get the next token
+    //next = sample(state.logits, config.vocab_size);
+    // https://github.com/keras-team/keras/blob/21c25fd38023a3783950c5577383ffe51a62f650/keras/backend_config.py#L34
+    return -log(s->logits[nexttok] + 1e-7);
 }
 
 // ----------------------------------------------------------------------------
@@ -400,8 +401,10 @@ long time_in_ms() {
 }
 
 int enzyme_const;
+int enzyme_primal_return;
 int enzyme_dup;
-void __enzyme_autodiff(void*, 
+float __enzyme_autodiff(void*, 
+        int,
         int, int,
         int, int,
         int, Config*,
@@ -437,7 +440,7 @@ int main(int argc, char *argv[]) {
     }
 
     // seed rng with time. if you want deterministic behavior use temperature 0.0
-    srand((unsigned int)time(NULL)); 
+    srand((unsigned int)1337);//time(NULL)); 
     
     // read in the model.bin file
     Config config;
@@ -471,6 +474,7 @@ int main(int argc, char *argv[]) {
         if (data == MAP_FAILED) { printf("mmap failed!\n"); return 1; }
         ddata = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (ddata == MAP_FAILED) { printf("mmap failed!\n"); return 1; }
+        memset(ddata, 0, file_size);
         weights_ptr = data + sizeof(Config)/sizeof(float);
         dweights_ptr = ddata + sizeof(Config)/sizeof(float);
         checkpoint_init_weights(&weights, &config, weights_ptr, shared_weights);
@@ -516,7 +520,7 @@ int main(int argc, char *argv[]) {
     printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
 
 
-    double alpha = 0.001;
+    double alpha = 1.0;
 
     if(training_data){
 
@@ -557,12 +561,11 @@ int main(int argc, char *argv[]) {
             
             
             int nexttok = maxj;
-            printf("%s", vocab[nexttok]);
-            fflush(stdout);
 
             // transformer(token, pos, &config, &state, &weights);
 
-            __enzyme_autodiff((void*)loss,
+            double lres = __enzyme_autodiff((void*)loss,
+                                enzyme_primal_return,
                                 enzyme_const, token,
                                 enzyme_const, pos,
                                 enzyme_const, &config,
@@ -571,9 +574,17 @@ int main(int argc, char *argv[]) {
                                 nexttok,
                                 enzyme_const, temperature);
 
+            printf("%s %d %f\n", vocab[nexttok], pos, lres);
+            fflush(stdout);
+
             for (size_t i =0, end=(file_size - sizeof(Config))/sizeof(float); i<end; i++) {
-                // if (abs(dweights_ptr[i]) > 1000 || isnan(dweights_ptr[i]))
-                //     printf("%i %f\n", i, dweights_ptr[i]);
+                if (fabs(dweights_ptr[i]) > 1000 || isnan(dweights_ptr[i])) {
+                    printf("%i %f\n", i, dweights_ptr[i]);
+                    exit(1);
+                }
+                if (fabs(dweights_ptr[i]) > 1e-2) {
+                    printf("%i %f %d\n", i, dweights_ptr[i], pos);
+                }
                 weights_ptr[i] += alpha * dweights_ptr[i];
                 dweights_ptr[i] = 0;
             }
@@ -588,6 +599,7 @@ int main(int argc, char *argv[]) {
         printf("\n\nFinished fine-tuning.\n\n");
 
         pos = 0;
+        zero_run_state(&state, &config);
         token = 1;
         printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
     }
@@ -639,17 +651,6 @@ int main(int argc, char *argv[]) {
         // printf("%d\n", next);
         printf("%s", vocab[next]);
         fflush(stdout);
-
-        int nexttok = next;
-        __enzyme_autodiff((void*)loss,
-                            enzyme_const, token,
-                            enzyme_const, pos,
-                            enzyme_const, &config,
-                            enzyme_dup, &state, &dstate, 
-                            enzyme_dup, &weights , &dweights,
-                            nexttok,
-                            enzyme_const, temperature);
-
         token = next;
         pos++;
 
